@@ -1,0 +1,11 @@
+# Virtual environment
+venv/
+
+# Environment variables
+.env
+
+# Pycache
+__pycache__/
+
+# Logs
+logs/

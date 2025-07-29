@@ -1,0 +1,6 @@
+python-telegram-bot
+telethon
+pyrogram
+pymongo[srv]
+python-dotenv
+tzdata
