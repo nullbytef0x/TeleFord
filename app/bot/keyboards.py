@@ -8,6 +8,7 @@ def main_menu_keyboard(user_id: int = None):
         [InlineKeyboardButton("📋 View My Rules", callback_data='my_rules')],
         [InlineKeyboardButton("⏳ Batch Forward", callback_data='batch_forward')],
         [InlineKeyboardButton("🔗 Forward by Link", callback_data='forward_by_link')],
+        [InlineKeyboardButton("🚫 Content Filters", callback_data='content_filters')],
         [InlineKeyboardButton("❓ Help", callback_data='help')],
     ]
     from config import Config
@@ -44,6 +45,8 @@ def session_management_keyboard():
 def content_type_keyboard():
     """Returns the content type selection keyboard."""
     keyboard = [
+        [InlineKeyboardButton("🖼️ Photo Only", callback_data='content_photo')],
+        [InlineKeyboardButton("🎥 Video Only", callback_data='content_video')],
         [InlineKeyboardButton("🖼️ Media Only", callback_data='content_media')],
         [InlineKeyboardButton("📄 Text Only", callback_data='content_text')],
         [InlineKeyboardButton("🖼️📄 Both", callback_data='content_both')],
@@ -81,10 +84,21 @@ def forwarding_style_keyboard_for_edit(rule_id: str):
 def content_type_keyboard_for_edit(rule_id: str):
     """Returns the content type selection keyboard for editing a rule."""
     keyboard = [
+        [InlineKeyboardButton("🖼️ Photo Only", callback_data=f'update_content_{rule_id}_photo')],
+        [InlineKeyboardButton("🎥 Video Only", callback_data=f'update_content_{rule_id}_video')],
         [InlineKeyboardButton("🖼️ Media Only", callback_data=f'update_content_{rule_id}_media')],
         [InlineKeyboardButton("📄 Text Only", callback_data=f'update_content_{rule_id}_text')],
         [InlineKeyboardButton("🖼️📄 Both", callback_data=f'update_content_{rule_id}_both')],
         [InlineKeyboardButton("⬅️ Back", callback_data='my_rules')],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def content_filters_keyboard():
+    """Returns the content filters menu keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("➕ Add to Blocklist", callback_data='add_to_blocklist')],
+        [InlineKeyboardButton("🗑️ Remove from Blocklist", callback_data='remove_from_blocklist')],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='main_menu')],
     ]
     return InlineKeyboardMarkup(keyboard)
 

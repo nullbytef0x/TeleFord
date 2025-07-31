@@ -13,7 +13,7 @@ from app.bot.keyboards import (
     main_menu_keyboard, back_keyboard, session_management_keyboard,
     content_type_keyboard, my_rules_keyboard, forwarding_style_keyboard,
     edit_rule_keyboard, forwarding_style_keyboard_for_edit, content_type_keyboard_for_edit,
-    owner_menu_keyboard
+    owner_menu_keyboard, content_filters_keyboard
 )
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # States for conversation
-SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION = range(20)
+SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION, ADD_TO_BLOCKLIST_LINK = range(21)
 
 # --- Authorization Decorators ---
 def is_owner(func):
@@ -110,6 +110,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return await owner_menu(update, context)
     elif query.data == 'forward_by_link':
         return await forward_by_link_start(update, context)
+    elif query.data == 'content_filters':
+        return await content_filters_menu(update, context)
 
 @is_authorized
 async def batch_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -651,6 +653,10 @@ async def run_batch_forward(user_id, source_chat, destination_chat, start_date, 
                 continue
             if content_type == "text" and not has_text:
                 continue
+            if content_type == "photo" and not message.photo:
+                continue
+            if content_type == "video" and not message.video:
+                continue
 
             try:
                 if style == "forwarded" and not message.noforwards:
@@ -949,3 +955,96 @@ async def export_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         logger.error(f"Error exporting logs: {e}")
         await query.edit_message_text("An error occurred while exporting the logs.")
+
+async def content_filters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the content filters menu."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        text="Manage your content filters:",
+        reply_markup=content_filters_keyboard()
+    )
+
+async def add_to_blocklist_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Asks the user for the message link to block."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        text="Please send me the link of the message you want to block.",
+        reply_markup=back_keyboard('content_filters')
+    )
+    return ADD_TO_BLOCKLIST_LINK
+
+async def blocklist_link_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the message link and adds its content to the blocklist."""
+    message_link = update.message.text
+    user_id = update.effective_user.id
+
+    status_message = await update.message.reply_text("Adding content to blocklist...")
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(
+        run_add_to_blocklist(
+            user_id,
+            message_link,
+            context.bot,
+            status_message.chat_id,
+            status_message.message_id,
+        )
+    )
+    return ConversationHandler.END
+
+async def run_add_to_blocklist(user_id, message_link, bot, chat_id, message_id):
+    """Connects with the user's client, fetches the message, and blocks its content."""
+    from app.db.database import sessions_collection, blocked_content_collection
+    from app.db.models import blocked_content_model
+    
+    session_data = sessions_collection.find_one({"user_id": user_id})
+    if not session_data:
+        logger.error(f"No session found for user {user_id} during blocklist add.")
+        await bot.edit_message_text("Could not find your session. Please /login again.", chat_id=chat_id, message_id=message_id)
+        return
+
+    client = TelegramClient(StringSession(session_data["session_string"]), Config.API_ID, Config.API_HASH)
+
+    try:
+        await client.connect()
+        
+        parts = message_link.split('/')
+        msg_id = int(parts[-1])
+
+        if "/c/" in message_link:
+            chat_id_str = parts[-2]
+            chat_entity = int("-100" + chat_id_str)
+        else:
+            chat_entity = parts[-2]
+
+        message = await client.get_messages(chat_entity, ids=msg_id)
+
+        if message:
+            media_id = None
+            text_content = message.text or None
+
+            if message.photo:
+                media_id = str(message.photo.id)
+            elif message.video:
+                media_id = str(message.video.id)
+
+            if media_id or text_content:
+                # Check if this exact content is already blocked
+                if blocked_content_collection.find_one({"user_id": user_id, "file_id": media_id, "text": text_content}):
+                    await bot.edit_message_text("This content is already on the blocklist.", chat_id=chat_id, message_id=message_id)
+                else:
+                    blocked_content_collection.insert_one(blocked_content_model(user_id, file_id=media_id, text=text_content))
+                    await bot.edit_message_text("Content has been added to the blocklist.", chat_id=chat_id, message_id=message_id)
+            else:
+                await bot.edit_message_text("This content type cannot be blocked.", chat_id=chat_id, message_id=message_id)
+        else:
+            await bot.edit_message_text("Could not find the message. Please ensure the link is correct.", chat_id=chat_id, message_id=message_id)
+
+    except Exception as e:
+        logger.error(f"Error during blocklist add for user {user_id}: {e}")
+        await bot.edit_message_text(f"Failed to add to blocklist. Error: {e}", chat_id=chat_id, message_id=message_id)
+    finally:
+        if client.is_connected():
+            await client.disconnect()

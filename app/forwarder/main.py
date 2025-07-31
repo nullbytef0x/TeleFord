@@ -3,7 +3,7 @@ import logging
 import os
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from app.db.database import sessions_collection, rules_collection
+from app.db.database import sessions_collection, rules_collection, blocked_content_collection
 from config import Config
 
 # Enable logging
@@ -55,6 +55,24 @@ async def start_client(session_data):
         
         for rule in current_rules:
             if event.chat_id in rule["source_chats"]:
+                # Check against blocklist
+                from app.db.database import blocked_content_collection
+                
+                media_id = None
+                text_content = event.message.text or None
+
+                if event.message.photo:
+                    media_id = str(event.message.photo.id)
+                elif event.message.video:
+                    media_id = str(event.message.video.id)
+
+                # Build the query to check for blocked content
+                block_query = {"user_id": user_id, "file_id": media_id, "text": text_content}
+                
+                if blocked_content_collection.find_one(block_query):
+                    logger.info(f"Skipping blocked content for user {user_id}")
+                    continue
+
                 destination = rule["destination_chat"]
                 style = rule["forwarding_style"]
                 content_type = rule.get("content_type", "both")
@@ -68,6 +86,12 @@ async def start_client(session_data):
                     continue
                 if content_type == "text" and not has_text:
                     logger.info(f"Skipping media message for text-only rule for user {user_id}")
+                    continue
+                if content_type == "photo" and not event.message.photo:
+                    logger.info(f"Skipping non-photo message for photo-only rule for user {user_id}")
+                    continue
+                if content_type == "video" and not event.message.video:
+                    logger.info(f"Skipping non-video message for video-only rule for user {user_id}")
                     continue
 
                 logger.info(f"MATCH: Rule matched for user {user_id}. Forwarding from {event.chat_id} to {destination}.")

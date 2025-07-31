@@ -20,6 +20,17 @@ def authorized_user_model(user_id: int, added_by: int):
         "created_at": datetime.utcnow()
     }
 
+def blocked_content_model(user_id: int, file_id: str = None, text: str = None):
+    """
+    Schema for a blocked content document.
+    """
+    return {
+        "user_id": user_id,
+        "file_id": file_id,
+        "text": text,
+        "created_at": datetime.utcnow()
+    }
+
 def session_model(user_id: int, session_string: str):
     """
     Schema for a user's session string.
