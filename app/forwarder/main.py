@@ -3,7 +3,8 @@ import logging
 import os
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from app.db.database import sessions_collection, rules_collection, blocked_content_collection
+from app.db.database import sessions_collection, rules_collection
+from app.utils.rate_limiter import RateLimiter
 from config import Config
 
 # Enable logging
@@ -19,6 +20,9 @@ async def start_client(session_data):
         StringSession(session_string), Config.API_ID, Config.API_HASH
     )
 
+    # Create a rate limiter for this user's real-time forwarding
+    rate_limiter = RateLimiter()
+
     try:
         logger.info(f"Connecting client for user_id: {user_id}...")
         await client.connect()
@@ -26,12 +30,12 @@ async def start_client(session_data):
             logger.warning(f"Session for user_id: {user_id} is not authorized. Skipping.")
             return
         logger.info(f"Client connected successfully for user_id: {user_id}")
-        
+
         # Fetch all dialogs to ensure the client is aware of all chats, including private ones
         logger.info(f"Fetching dialogs for user_id: {user_id}...")
         await client.get_dialogs()
         logger.info(f"Dialogs fetched successfully for user_id: {user_id}")
-        
+
     except Exception as e:
         logger.error(f"Failed to connect or fetch dialogs for user_id: {user_id}. Error: {e}")
         return
@@ -49,38 +53,20 @@ async def start_client(session_data):
     @client.on(events.NewMessage(chats=source_chats))
     async def handler(event):
         logger.info(f"EVENT: New message received for user {user_id} from chat {event.chat_id}")
-        
+
         # Re-fetch rules on every new message to ensure they are up-to-date
         current_rules = list(rules_collection.find({"user_id": user_id, "enabled": True}))
-        
+
         for rule in current_rules:
             if event.chat_id in rule["source_chats"]:
-                # Check against blocklist
-                from app.db.database import blocked_content_collection
-                
-                media_id = None
-                text_content = event.message.text or None
-
-                if event.message.photo:
-                    media_id = str(event.message.photo.id)
-                elif event.message.video:
-                    media_id = str(event.message.video.id)
-
-                # Build the query to check for blocked content
-                block_query = {"user_id": user_id, "file_id": media_id, "text": text_content}
-                
-                if blocked_content_collection.find_one(block_query):
-                    logger.info(f"Skipping blocked content for user {user_id}")
-                    continue
-
                 destination = rule["destination_chat"]
                 style = rule["forwarding_style"]
                 content_type = rule.get("content_type", "both")
-                
+
                 # Content type filtering
                 has_media = event.message.media is not None
                 has_text = event.message.text is not None
-                
+
                 if content_type == "media" and not has_media:
                     logger.info(f"Skipping text-only message for media-only rule for user {user_id}")
                     continue
@@ -95,8 +81,11 @@ async def start_client(session_data):
                     continue
 
                 logger.info(f"MATCH: Rule matched for user {user_id}. Forwarding from {event.chat_id} to {destination}.")
-                
+
                 try:
+                    # Apply rate limiting for real-time forwarding
+                    await rate_limiter.wait_if_needed(is_media=has_media, is_bulk=False)
+
                     if style == "forwarded" and not event.message.noforwards:
                         await event.forward_to(destination)
                     else:
@@ -106,7 +95,7 @@ async def start_client(session_data):
                             if event.message.sticker or event.message.gif:
                                 logger.info(f"Skipping sticker/GIF for user {user_id}")
                                 continue
-                            
+
                             logger.info(f"Downloading media from protected message for user {user_id}...")
                             file_path = await event.message.download_media(file="temp/")
                             await client.send_file(destination, file_path, caption=event.message.text if has_text else None)

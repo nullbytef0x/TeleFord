@@ -13,7 +13,7 @@ from app.bot.keyboards import (
     main_menu_keyboard, back_keyboard, session_management_keyboard,
     content_type_keyboard, my_rules_keyboard, forwarding_style_keyboard,
     edit_rule_keyboard, forwarding_style_keyboard_for_edit, content_type_keyboard_for_edit,
-    owner_menu_keyboard, content_filters_keyboard
+    owner_menu_keyboard
 )
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # States for conversation
-SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION, ADD_TO_BLOCKLIST_LINK = range(21)
+SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION = range(20)
 
 # --- Authorization Decorators ---
 def is_owner(func):
@@ -110,8 +110,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return await owner_menu(update, context)
     elif query.data == 'forward_by_link':
         return await forward_by_link_start(update, context)
-    elif query.data == 'content_filters':
-        return await content_filters_menu(update, context)
 
 @is_authorized
 async def batch_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -621,6 +619,8 @@ async def batch_style_received(update: Update, context: ContextTypes.DEFAULT_TYP
 async def run_batch_forward(user_id, source_chat, destination_chat, start_date, end_date, style, content_type, bot, chat_id, message_id):
     """Connects with the user's client and forwards messages from the specified date range."""
     from app.db.database import sessions_collection
+    from app.utils.rate_limiter import RateLimiter
+
     session_data = sessions_collection.find_one({"user_id": user_id})
     if not session_data:
         logger.error(f"No session found for user {user_id} during batch forward.")
@@ -628,12 +628,15 @@ async def run_batch_forward(user_id, source_chat, destination_chat, start_date, 
         return
 
     client = TelegramClient(StringSession(session_data["session_string"]), Config.API_ID, Config.API_HASH)
-    
+    rate_limiter = RateLimiter()
+
     try:
         await client.connect()
         logger.info(f"Starting batch forward for user {user_id} from chat {source_chat} to {destination_chat} with style '{style}'")
         count = 0
+        skipped = 0
         messages_to_forward = []
+
         # Iterate backwards from the newest messages
         async for message in client.iter_messages(source_chat):
             # If the message is older than the start date, we can stop
@@ -643,22 +646,39 @@ async def run_batch_forward(user_id, source_chat, destination_chat, start_date, 
             if message.date <= end_date:
                 messages_to_forward.append(message)
 
+        total_messages = len(messages_to_forward)
+        logger.info(f"Found {total_messages} messages to forward for user {user_id}")
+
+        # Update user with total count
+        await bot.edit_message_text(
+            f"Found {total_messages} messages. Starting forward with smart rate limiting...",
+            chat_id=chat_id,
+            message_id=message_id
+        )
+
         # Forward messages in chronological order
-        for message in reversed(messages_to_forward):
+        for idx, message in enumerate(reversed(messages_to_forward), 1):
             # Content type filtering
             has_media = message.media is not None
             has_text = message.text is not None
 
             if content_type == "media" and not has_media:
+                skipped += 1
                 continue
             if content_type == "text" and not has_text:
+                skipped += 1
                 continue
             if content_type == "photo" and not message.photo:
+                skipped += 1
                 continue
             if content_type == "video" and not message.video:
+                skipped += 1
                 continue
 
             try:
+                # Apply rate limiting BEFORE forwarding
+                await rate_limiter.wait_if_needed(is_media=has_media, is_bulk=True)
+
                 if style == "forwarded" and not message.noforwards:
                     await message.forward_to(destination_chat)
                 else:
@@ -672,19 +692,38 @@ async def run_batch_forward(user_id, source_chat, destination_chat, start_date, 
                         await client.send_message(destination_chat, message.text)
 
                 count += 1
+
+                # Update progress every 10 messages
                 if count % 10 == 0:
-                    await asyncio.sleep(5)  # 5-second delay every 10 messages
-                else:
-                    await asyncio.sleep(1) # 1-second delay for other messages
+                    stats = rate_limiter.get_stats()
+                    await bot.edit_message_text(
+                        f"Progress: {count}/{total_messages} forwarded ({skipped} skipped)\n"
+                        f"Rate: {stats['messages_per_second']:.2f} msg/s\n"
+                        f"Elapsed: {stats['elapsed_seconds']:.0f}s",
+                        chat_id=chat_id,
+                        message_id=message_id
+                    )
+
             except Exception as e:
                 logger.error(f"Could not forward message {message.id} for user {user_id}: {e}")
+                skipped += 1
                 continue
 
-        logger.info(f"Batch forward completed for user {user_id}. Forwarded {count} messages.")
-        await bot.edit_message_text(f"Batch forward completed! Forwarded {count} messages.", chat_id=chat_id, message_id=message_id)
+        stats = rate_limiter.get_stats()
+        logger.info(f"Batch forward completed for user {user_id}. Forwarded {count} messages, skipped {skipped}.")
+        await bot.edit_message_text(
+            f"✅ Batch forward completed!\n\n"
+            f"📊 Statistics:\n"
+            f"• Forwarded: {count} messages\n"
+            f"• Skipped: {skipped} messages\n"
+            f"• Total time: {stats['elapsed_seconds']:.0f} seconds\n"
+            f"• Average rate: {stats['messages_per_second']:.2f} msg/s",
+            chat_id=chat_id,
+            message_id=message_id
+        )
     except Exception as e:
         logger.error(f"Error during batch forward for user {user_id}: {e}")
-        await bot.edit_message_text(f"Batch forward failed. Error: {e}", chat_id=chat_id, message_id=message_id)
+        await bot.edit_message_text(f"❌ Batch forward failed. Error: {e}", chat_id=chat_id, message_id=message_id)
     finally:
         if client.is_connected():
             await client.disconnect()
@@ -956,95 +995,3 @@ async def export_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error(f"Error exporting logs: {e}")
         await query.edit_message_text("An error occurred while exporting the logs.")
 
-async def content_filters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the content filters menu."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text="Manage your content filters:",
-        reply_markup=content_filters_keyboard()
-    )
-
-async def add_to_blocklist_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Asks the user for the message link to block."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text="Please send me the link of the message you want to block.",
-        reply_markup=back_keyboard('content_filters')
-    )
-    return ADD_TO_BLOCKLIST_LINK
-
-async def blocklist_link_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receives the message link and adds its content to the blocklist."""
-    message_link = update.message.text
-    user_id = update.effective_user.id
-
-    status_message = await update.message.reply_text("Adding content to blocklist...")
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(
-        run_add_to_blocklist(
-            user_id,
-            message_link,
-            context.bot,
-            status_message.chat_id,
-            status_message.message_id,
-        )
-    )
-    return ConversationHandler.END
-
-async def run_add_to_blocklist(user_id, message_link, bot, chat_id, message_id):
-    """Connects with the user's client, fetches the message, and blocks its content."""
-    from app.db.database import sessions_collection, blocked_content_collection
-    from app.db.models import blocked_content_model
-    
-    session_data = sessions_collection.find_one({"user_id": user_id})
-    if not session_data:
-        logger.error(f"No session found for user {user_id} during blocklist add.")
-        await bot.edit_message_text("Could not find your session. Please /login again.", chat_id=chat_id, message_id=message_id)
-        return
-
-    client = TelegramClient(StringSession(session_data["session_string"]), Config.API_ID, Config.API_HASH)
-
-    try:
-        await client.connect()
-        
-        parts = message_link.split('/')
-        msg_id = int(parts[-1])
-
-        if "/c/" in message_link:
-            chat_id_str = parts[-2]
-            chat_entity = int("-100" + chat_id_str)
-        else:
-            chat_entity = parts[-2]
-
-        message = await client.get_messages(chat_entity, ids=msg_id)
-
-        if message:
-            media_id = None
-            text_content = message.text or None
-
-            if message.photo:
-                media_id = str(message.photo.id)
-            elif message.video:
-                media_id = str(message.video.id)
-
-            if media_id or text_content:
-                # Check if this exact content is already blocked
-                if blocked_content_collection.find_one({"user_id": user_id, "file_id": media_id, "text": text_content}):
-                    await bot.edit_message_text("This content is already on the blocklist.", chat_id=chat_id, message_id=message_id)
-                else:
-                    blocked_content_collection.insert_one(blocked_content_model(user_id, file_id=media_id, text=text_content))
-                    await bot.edit_message_text("Content has been added to the blocklist.", chat_id=chat_id, message_id=message_id)
-            else:
-                await bot.edit_message_text("This content type cannot be blocked.", chat_id=chat_id, message_id=message_id)
-        else:
-            await bot.edit_message_text("Could not find the message. Please ensure the link is correct.", chat_id=chat_id, message_id=message_id)
-
-    except Exception as e:
-        logger.error(f"Error during blocklist add for user {user_id}: {e}")
-        await bot.edit_message_text(f"Failed to add to blocklist. Error: {e}", chat_id=chat_id, message_id=message_id)
-    finally:
-        if client.is_connected():
-            await client.disconnect()

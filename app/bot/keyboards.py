@@ -8,7 +8,6 @@ def main_menu_keyboard(user_id: int = None):
         [InlineKeyboardButton("📋 View My Rules", callback_data='my_rules')],
         [InlineKeyboardButton("⏳ Batch Forward", callback_data='batch_forward')],
         [InlineKeyboardButton("🔗 Forward by Link", callback_data='forward_by_link')],
-        [InlineKeyboardButton("🚫 Content Filters", callback_data='content_filters')],
         [InlineKeyboardButton("❓ Help", callback_data='help')],
     ]
     from config import Config
@@ -92,16 +91,6 @@ def content_type_keyboard_for_edit(rule_id: str):
         [InlineKeyboardButton("⬅️ Back", callback_data='my_rules')],
     ]
     return InlineKeyboardMarkup(keyboard)
-
-def content_filters_keyboard():
-    """Returns the content filters menu keyboard."""
-    keyboard = [
-        [InlineKeyboardButton("➕ Add to Blocklist", callback_data='add_to_blocklist')],
-        [InlineKeyboardButton("🗑️ Remove from Blocklist", callback_data='remove_from_blocklist')],
-        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='main_menu')],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
 
 def my_rules_keyboard():
     """Returns a keyboard with edit and delete buttons."""

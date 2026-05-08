@@ -18,8 +18,7 @@ from app.bot.handlers import (
     owner_menu, add_user_start, add_user_received, list_users, remove_user_start, remove_user_received, export_logs,
     ADD_USER_ID, REMOVE_USER_ID, batch_content_type_received,
     forward_by_link_start, forward_by_link_link_received, forward_by_link_destination_received,
-    FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION,
-    content_filters_menu, add_to_blocklist_start, blocklist_link_received, ADD_TO_BLOCKLIST_LINK
+    FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION
 )
 
 # Enable logging
@@ -41,7 +40,6 @@ async def main(forwarder_tasks) -> None:
             CallbackQueryHandler(add_user_start, pattern='^add_user$'),
             CallbackQueryHandler(remove_user_start, pattern='^remove_user$'),
             CallbackQueryHandler(forward_by_link_start, pattern='^forward_by_link$'),
-            CallbackQueryHandler(add_to_blocklist_start, pattern='^add_to_blocklist$'),
         ],
         states={
             LOGIN_SESSION: [MessageHandler(filters.TEXT & ~filters.COMMAND, session_received)],
@@ -69,7 +67,6 @@ async def main(forwarder_tasks) -> None:
             ],
             CHOOSE_EDIT_STYLE: [CallbackQueryHandler(update_rule_field, pattern='^update_style_')],
             CHOOSE_EDIT_CONTENT: [CallbackQueryHandler(update_rule_field, pattern='^update_content_')],
-            ADD_TO_BLOCKLIST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, blocklist_link_received)],
         },
         fallbacks=[
             CallbackQueryHandler(show_main_menu, pattern='^main_menu$'),
@@ -94,7 +91,6 @@ async def main(forwarder_tasks) -> None:
     application.add_handler(CallbackQueryHandler(owner_menu, pattern='^owner_menu$'))
     application.add_handler(CallbackQueryHandler(list_users, pattern='^list_users$'))
     application.add_handler(CallbackQueryHandler(export_logs, pattern='^export_logs$'))
-    application.add_handler(CallbackQueryHandler(content_filters_menu, pattern='^content_filters$'))
     application.add_handler(conv_handler)
 
     await application.initialize()
