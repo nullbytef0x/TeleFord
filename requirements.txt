@@ -4,3 +4,4 @@ pyrogram
 pymongo[srv]
 python-dotenv
 tzdata
+qrcode[pil]

@@ -13,7 +13,7 @@ from app.bot.keyboards import (
     main_menu_keyboard, back_keyboard, session_management_keyboard,
     content_type_keyboard, my_rules_keyboard, forwarding_style_keyboard,
     edit_rule_keyboard, forwarding_style_keyboard_for_edit, content_type_keyboard_for_edit,
-    owner_menu_keyboard
+    owner_menu_keyboard, login_method_keyboard
 )
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # States for conversation
-SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION = range(20)
+SOURCE, DESTINATION, STYLE, CONTENT_TYPE, LOGIN_SESSION, BATCH_SOURCE, BATCH_DESTINATION, BATCH_START_DATE, BATCH_END_DATE, BATCH_STYLE, DELETE_RULE_NUMBER, EDIT_RULE_NUMBER, EDIT_RULE_MENU, CHOOSE_EDIT_STYLE, CHOOSE_EDIT_CONTENT, ADD_USER_ID, REMOVE_USER_ID, BATCH_CONTENT_TYPE, FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION, LOGIN_METHOD, LOGIN_QR, LOGIN_2FA = range(23)
 
 # --- Authorization Decorators ---
 def is_owner(func):
@@ -115,6 +115,22 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def batch_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the batch forward conversation."""
     query = update.callback_query
+
+    # Check if user has a session
+    user_id = update.effective_user.id
+    from app.db.database import sessions_collection
+    session_data = sessions_collection.find_one({"user_id": user_id})
+
+    if not session_data:
+        await query.edit_message_text(
+            "❌ **Not Logged In**\n\n"
+            "You need to login first before using batch forward.\n\n"
+            "Go to: Session Management → Add / Update Session",
+            reply_markup=back_keyboard('main_menu'),
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
     await query.edit_message_text(
         text="Let's start a batch forward. First, send me the source chat ID.",
         reply_markup=back_keyboard('main_menu')
@@ -126,6 +142,22 @@ async def new_rule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the new rule conversation."""
     query = update.callback_query
     await query.answer()
+
+    # Check if user has a session
+    user_id = update.effective_user.id
+    from app.db.database import sessions_collection
+    session_data = sessions_collection.find_one({"user_id": user_id})
+
+    if not session_data:
+        await query.edit_message_text(
+            "❌ **Not Logged In**\n\n"
+            "You need to login first before creating forwarding rules.\n\n"
+            "Go to: Session Management → Add / Update Session",
+            reply_markup=back_keyboard('main_menu'),
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
     await query.edit_message_text(
         text="Let's set up a new rule.\n\nPlease send me the source chat IDs, separated by commas.",
         reply_markup=back_keyboard('main_menu')
@@ -134,15 +166,367 @@ async def new_rule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 @is_authorized
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Asks the user for their session string."""
+    """Shows login method selection."""
     query = update.callback_query
+    await query.answer()
     await query.edit_message_text(
-        text="Please send me your Telethon session string. "
-             "You can generate one by running a script locally. "
-             "See the README for instructions.",
-        reply_markup=back_keyboard('main_menu')
+        text="Choose your login method:\n\n"
+             "📱 QR Code: Fast, secure, official Telegram method (Recommended)\n"
+             "🔑 Session String: For users who already have a session string",
+        reply_markup=login_method_keyboard()
     )
-    return LOGIN_SESSION
+    return LOGIN_METHOD
+
+@is_authorized
+async def login_method_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles login method selection."""
+    query = update.callback_query
+    await query.answer()
+
+    # Store the login method selection message ID for later deletion
+    context.user_data['login_method_message_id'] = query.message.message_id
+
+    if query.data == 'login_qr':
+        return await qr_login_start(update, context)
+    elif query.data == 'login_string':
+        await query.edit_message_text(
+            text="🔑 Login with Session String\n\n"
+                 "Please send me your Telethon session string. "
+                 "You can generate one by running the generate_session.py script locally. "
+                 "See the README for instructions.",
+            reply_markup=back_keyboard('session_management')
+        )
+        return LOGIN_SESSION
+
+@is_authorized
+async def qr_login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts QR code login using official Telegram API.
+
+    Official flow from https://core.telegram.org/api/qr-login:
+    1. Export login token via auth.exportLoginToken
+    2. Encode token as base64url (RFC 4648)
+    3. Generate QR code with tg://login?token=<token>
+    4. Wait for user to scan (30 seconds)
+    5. Confirm login when updateLoginToken received
+    """
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    try:
+        # Create a new client
+        client = TelegramClient(StringSession(), Config.API_ID, Config.API_HASH)
+        await client.connect()
+
+        # Generate QR code login using official Telegram API
+        qr_login = await client.qr_login()
+
+        # Store client in context for later use
+        context.user_data['temp_client'] = client
+        context.user_data['qr_login'] = qr_login
+
+        # Encode token properly using base64url (RFC 4648) without padding
+        import base64
+        token_b64url = base64.urlsafe_b64encode(qr_login.token).decode('ascii').rstrip('=')
+        qr_url = f"tg://login?token={token_b64url}"
+
+        logger.info(f"Generated QR login token for user {user_id}")
+
+        # Generate QR code image
+        import qrcode
+        from io import BytesIO
+
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        # Save to bytes
+        bio = BytesIO()
+        bio.name = 'qr_code.png'
+        img.save(bio, 'PNG')
+        bio.seek(0)
+
+        # Send QR code with detailed instructions
+        qr_message = await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=bio,
+            caption="📱 **QR Code Login** (Official Telegram Method)\n\n"
+                    "⏱️ **Token expires in 30 seconds**\n\n"
+                    "**How to login:**\n"
+                    "1️⃣ Open **Telegram** on your phone\n"
+                    "2️⃣ Go to Settings → Devices → Link Desktop Device\n"
+                    "3️⃣ **Scan this QR code** immediately\n\n"
+                    "If you have 2FA enabled, you'll be asked for your password.",
+            parse_mode='Markdown'
+        )
+
+        # Store QR message ID for later deletion
+        context.user_data['qr_message_id'] = qr_message.message_id
+
+        logger.info(f"QR code sent to user {user_id}. Waiting for scan...")
+
+        # Wait for token acceptance with timeout
+        try:
+            # Use a longer timeout to account for network delays
+            await asyncio.wait_for(qr_login.wait(), timeout=35)
+
+            logger.info(f"QR login token accepted for user {user_id}")
+
+            # Check if authorization is complete
+            if not await client.is_user_authorized():
+                logger.warning(f"Client not authorized after QR scan for user {user_id}, checking for 2FA")
+                twofa_message = await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="🔐 **Two-Factor Authentication Required**\n\n"
+                         "Please send me your 2FA password (cloud password):\n"
+                         "Settings → Privacy and Security → Two-Step Verification",
+                    parse_mode='Markdown'
+                )
+                # Store 2FA prompt message ID for later deletion
+                context.user_data['twofa_message_id'] = twofa_message.message_id
+                return LOGIN_2FA
+
+            # Login successful!
+            session_string = client.session.save()
+
+            from app.db.database import sessions_collection
+            from app.db.models import session_model
+            sessions_collection.update_one(
+                {"user_id": user_id},
+                {"$set": session_model(user_id, session_string)},
+                upsert=True
+            )
+
+            me = await client.get_me()
+            logger.info(f"Successfully logged in as {me.first_name} for user {user_id}")
+
+            # Delete sensitive messages
+            messages_to_delete = []
+
+            # Delete login method selection message
+            if 'login_method_message_id' in context.user_data:
+                messages_to_delete.append(context.user_data['login_method_message_id'])
+
+            # Delete QR code message
+            if 'qr_message_id' in context.user_data:
+                messages_to_delete.append(context.user_data['qr_message_id'])
+
+            # Delete all messages
+            for msg_id in messages_to_delete:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=update.effective_chat.id,
+                        message_id=msg_id
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not delete message {msg_id}: {e}")
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"✅ **Login Successful!**\n\n"
+                     f"Logged in as: **{me.first_name}**\n"
+                     f"Phone: `{me.phone}`\n\n"
+                     "Your session has been saved. You can now use the bot!",
+                parse_mode='Markdown'
+            )
+
+            # Clean up
+            await client.disconnect()
+            context.user_data.pop('temp_client', None)
+            context.user_data.pop('qr_login', None)
+            context.user_data.pop('qr_message_id', None)
+            context.user_data.pop('twofa_message_id', None)
+            context.user_data.pop('login_method_message_id', None)
+
+            return ConversationHandler.END
+
+        except asyncio.TimeoutError:
+            logger.warning(f"QR login timeout for user {user_id}")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⏱️ **QR Code Expired**\n\n"
+                     "The QR code expired. This usually means:\n"
+                     "• You didn't scan it in time\n"
+                     "• Network connection was slow\n\n"
+                     "Please try again.",
+                parse_mode='Markdown'
+            )
+            await client.disconnect()
+            context.user_data.pop('temp_client', None)
+            context.user_data.pop('qr_login', None)
+            return ConversationHandler.END
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Error during QR login for user {user_id}: {e}")
+
+        # Handle specific error cases per Telegram API docs
+        if "AUTH_TOKEN_EXPIRED" in error_str:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⏱️ **Auth Token Expired**\n\nPlease start the login process again.",
+                parse_mode='Markdown'
+            )
+        elif "AUTH_TOKEN_ALREADY_ACCEPTED" in error_str:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="✅ **Token Already Accepted**\n\n"
+                     "The QR code was already scanned. "
+                     "Please try again or use the session string method.",
+                parse_mode='Markdown'
+            )
+        elif "password" in error_str.lower() or "two-step" in error_str.lower():
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="🔐 **Two-Factor Authentication Required**\n\n"
+                     "Please send me your 2FA password (cloud password).",
+                parse_mode='Markdown'
+            )
+            return LOGIN_2FA
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ **Error During Login**\n\n"
+                     f"Error: `{error_str}`\n\n"
+                     "Please try the **Session String** method instead:\n"
+                     "1. Run `python generate_session.py`\n"
+                     "2. Paste the session string when prompted",
+                parse_mode='Markdown'
+            )
+
+        # Clean up
+        if 'temp_client' in context.user_data:
+            try:
+                await context.user_data['temp_client'].disconnect()
+            except:
+                pass
+            context.user_data.pop('temp_client', None)
+            context.user_data.pop('qr_login', None)
+
+        return ConversationHandler.END
+
+async def qr_password_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles 2FA password after QR code scan."""
+    password = update.message.text
+    user_id = update.effective_user.id
+
+    # Store password message ID for deletion
+    password_message_id = update.message.message_id
+
+    try:
+        client = context.user_data.get('temp_client')
+        if not client:
+            await update.message.reply_text("❌ Session expired. Please start the login process again.")
+            return ConversationHandler.END
+
+        # Sign in with 2FA password
+        await client.sign_in(password=password)
+
+        # Check if now authorized
+        if not await client.is_user_authorized():
+            await update.message.reply_text(
+                "❌ **Incorrect Password**\n\n"
+                "The 2FA password you entered is incorrect.\n\n"
+                "Please try again and send your correct 2FA password:",
+                parse_mode='Markdown'
+            )
+            return LOGIN_2FA
+
+        # Save session
+        session_string = client.session.save()
+
+        from app.db.database import sessions_collection
+        from app.db.models import session_model
+        sessions_collection.update_one(
+            {"user_id": user_id},
+            {"$set": session_model(user_id, session_string)},
+            upsert=True
+        )
+
+        me = await client.get_me()
+        logger.info(f"Successfully logged in with 2FA as {me.first_name} for user {user_id}")
+
+        # Delete sensitive messages
+        messages_to_delete = []
+
+        # Delete login method selection message
+        if 'login_method_message_id' in context.user_data:
+            messages_to_delete.append(context.user_data['login_method_message_id'])
+
+        # Delete QR code message
+        if 'qr_message_id' in context.user_data:
+            messages_to_delete.append(context.user_data['qr_message_id'])
+
+        # Delete 2FA prompt message
+        if 'twofa_message_id' in context.user_data:
+            messages_to_delete.append(context.user_data['twofa_message_id'])
+
+        # Delete password message
+        messages_to_delete.append(password_message_id)
+
+        # Delete all messages
+        for msg_id in messages_to_delete:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg_id
+                )
+            except Exception as e:
+                logger.warning(f"Could not delete message {msg_id}: {e}")
+
+        await update.message.reply_text(
+            f"✅ **Login Successful!**\n\n"
+            f"Logged in as: **{me.first_name}**\n"
+            f"Phone: `{me.phone}`\n\n"
+            "Your session has been saved. You can now use the bot!",
+            parse_mode='Markdown'
+        )
+
+        # Clean up
+        await client.disconnect()
+        context.user_data.pop('temp_client', None)
+        context.user_data.pop('qr_login', None)
+        context.user_data.pop('qr_message_id', None)
+        context.user_data.pop('twofa_message_id', None)
+        context.user_data.pop('login_method_message_id', None)
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Error during 2FA login for user {user_id}: {e}")
+
+        # Check if it's a password error
+        if "PASSWORD_HASH_INVALID" in error_str or "password" in error_str.lower():
+            await update.message.reply_text(
+                "❌ **Incorrect Password**\n\n"
+                "The 2FA password you entered is incorrect.\n\n"
+                "Please try again and send your correct 2FA password:",
+                parse_mode='Markdown'
+            )
+            return LOGIN_2FA
+        else:
+            await update.message.reply_text(
+                f"❌ **2FA Login Failed**\n\n"
+                f"Error: `{error_str}`\n\n"
+                "Please try the login process again.",
+                parse_mode='Markdown'
+            )
+
+            # Clean up
+            try:
+                await context.user_data['temp_client'].disconnect()
+            except:
+                pass
+            context.user_data.pop('temp_client', None)
+            context.user_data.pop('qr_login', None)
+
+            return ConversationHandler.END
 
 async def session_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the session string, validates it, and saves it."""
@@ -312,8 +696,23 @@ async def my_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the user's current forwarding rules."""
     query = update.callback_query
     await query.answer()
-    
+
     user_id = update.effective_user.id
+
+    # Check if user has a session
+    from app.db.database import sessions_collection
+    session_data = sessions_collection.find_one({"user_id": user_id})
+
+    if not session_data:
+        await query.edit_message_text(
+            "❌ **Not Logged In**\n\n"
+            "You need to login first to view your forwarding rules.\n\n"
+            "Go to: Session Management → Add / Update Session",
+            reply_markup=back_keyboard('main_menu'),
+            parse_mode='Markdown'
+        )
+        return
+
     from app.db.database import rules_collection
     user_rules = list(rules_collection.find({"user_id": user_id}))
 
@@ -330,7 +729,7 @@ async def my_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text += f"  Content: {rule.get('content_type', 'both').capitalize()}\n"
             text += f"  Enabled: {rule['enabled']}\n\n"
         reply_markup = my_rules_keyboard()
-    
+
     await query.edit_message_text(text, reply_markup=reply_markup)
 
 @is_authorized
@@ -765,20 +1164,40 @@ async def view_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 @is_authorized
 async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Deletes the current session."""
+    """Deletes the current session and all associated user data."""
     query = update.callback_query
     await query.answer()
-    
-    user_id = update.effective_user.id
-    from app.db.database import sessions_collection
-    result = sessions_collection.delete_one({"user_id": user_id})
 
-    if result.deleted_count > 0:
-        text = "Your session has been deleted."
+    user_id = update.effective_user.id
+    from app.db.database import sessions_collection, rules_collection, users_collection
+
+    # Delete session
+    session_result = sessions_collection.delete_one({"user_id": user_id})
+
+    # Delete all forwarding rules
+    rules_result = rules_collection.delete_many({"user_id": user_id})
+
+    # Stop the forwarder task if running
+    forwarder_tasks = context.bot_data.get("forwarder_tasks", {})
+    if user_id in forwarder_tasks:
+        task = forwarder_tasks[user_id]
+        task.cancel()
+        forwarder_tasks.pop(user_id)
+        logger.info(f"Stopped forwarder task for user_id: {user_id}")
+
+    if session_result.deleted_count > 0:
+        text = (
+            "✅ **Session Deleted Successfully**\n\n"
+            f"• Session removed\n"
+            f"• {rules_result.deleted_count} forwarding rule(s) deleted\n"
+            f"• Forwarder stopped\n\n"
+            "All your data has been removed from the bot."
+        )
+        logger.info(f"User {user_id} deleted session and {rules_result.deleted_count} rules")
     else:
         text = "You were not logged in."
 
-    await query.edit_message_text(text, reply_markup=back_keyboard('session_management'))
+    await query.edit_message_text(text, reply_markup=back_keyboard('session_management'), parse_mode='Markdown')
 
 async def restart_forwarder_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Stops and restarts the forwarder task for a specific user."""
@@ -892,6 +1311,22 @@ async def forward_by_link_start(update: Update, context: ContextTypes.DEFAULT_TY
     """Starts the forward by link conversation."""
     query = update.callback_query
     await query.answer()
+
+    # Check if user has a session
+    user_id = update.effective_user.id
+    from app.db.database import sessions_collection
+    session_data = sessions_collection.find_one({"user_id": user_id})
+
+    if not session_data:
+        await query.edit_message_text(
+            "❌ **Not Logged In**\n\n"
+            "You need to login first before forwarding messages.\n\n"
+            "Go to: Session Management → Add / Update Session",
+            reply_markup=back_keyboard('main_menu'),
+            parse_mode='Markdown'
+        )
+        return ConversationHandler.END
+
     await query.edit_message_text(
         "Please send me the message link.",
         reply_markup=back_keyboard('main_menu')

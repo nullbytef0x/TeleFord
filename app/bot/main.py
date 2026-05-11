@@ -18,7 +18,9 @@ from app.bot.handlers import (
     owner_menu, add_user_start, add_user_received, list_users, remove_user_start, remove_user_received, export_logs,
     ADD_USER_ID, REMOVE_USER_ID, batch_content_type_received,
     forward_by_link_start, forward_by_link_link_received, forward_by_link_destination_received,
-    FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION
+    FORWARD_BY_LINK_LINK, FORWARD_BY_LINK_DESTINATION,
+    login_method_selection, qr_login_start, qr_password_received,
+    LOGIN_METHOD, LOGIN_QR, LOGIN_2FA
 )
 
 # Enable logging
@@ -42,7 +44,13 @@ async def main(forwarder_tasks) -> None:
             CallbackQueryHandler(forward_by_link_start, pattern='^forward_by_link$'),
         ],
         states={
+            LOGIN_METHOD: [
+                CallbackQueryHandler(login_method_selection, pattern='^login_qr$'),
+                CallbackQueryHandler(login_method_selection, pattern='^login_string$'),
+            ],
             LOGIN_SESSION: [MessageHandler(filters.TEXT & ~filters.COMMAND, session_received)],
+            LOGIN_QR: [MessageHandler(filters.TEXT & ~filters.COMMAND, qr_password_received)],
+            LOGIN_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, qr_password_received)],
             SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, source_received)],
             DESTINATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, destination_received)],
             STYLE: [CallbackQueryHandler(style_received, pattern='^style_')],

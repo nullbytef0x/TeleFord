@@ -41,6 +41,15 @@ def session_management_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def login_method_keyboard():
+    """Returns the login method selection keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("📱 QR Code Login (Recommended)", callback_data='login_qr')],
+        [InlineKeyboardButton("🔑 Session String (Advanced)", callback_data='login_string')],
+        [InlineKeyboardButton("⬅️ Back", callback_data='session_management')],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def content_type_keyboard():
     """Returns the content type selection keyboard."""
     keyboard = [
